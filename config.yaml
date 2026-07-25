@@ -1,0 +1,102 @@
+# Eco-Loop Building Agents — single source of truth for all runtime settings.
+# Nothing in src/ hardcodes a path or a bound. Change it here.
+
+energyplus:
+  # Directory containing the `pyenergyplus/` package (the EnergyPlus install root).
+  # Windows : C:/EnergyPlusV24-1-0
+  # Linux   : /usr/local/EnergyPlus-24-1-0
+  # macOS   : /Applications/EnergyPlus-24-1-0
+  install_root: "C:/EnergyPlusV24-1-0"
+  epw: "C:/EnergyPlusV24-1-0/WeatherData/USA_IL_Chicago-OHare.Intl.AP.725300_TMY3.epw"
+
+  # Swap the model freely — see scripts/instrument_idf.py to prepare a new one.
+  # Option A (recommended, realistic loads):
+  #   ExampleFiles/RefBldgSmallOfficeNew2004_Chicago.idf
+  # Option B (smaller, faster iterations):
+  #   ExampleFiles/5ZoneAirCooled.idf
+  idf: "models/ai_instrumented.idf"
+
+  output_dir_baseline: "out_baseline"
+  output_dir_ai: "out_ai"
+  console_output: false
+
+# Zones to control. MUST match the zone names in your IDF (uppercase in the API).
+# For RefBldgSmallOfficeNew2004 the core/perimeter zones are named like:
+#   CORE_ZN, PERIMETER_ZN_1, PERIMETER_ZN_2, PERIMETER_ZN_3, PERIMETER_ZN_4
+# For 5ZoneAirCooled:
+#   SPACE1-1, SPACE2-1, SPACE3-1, SPACE4-1, SPACE5-1
+# Run `python scripts/dump_actuators.py` after a first run to confirm.
+zones:
+  - "CORE_ZN"
+  - "PERIMETER_ZN_1"
+  - "PERIMETER_ZN_2"
+  - "PERIMETER_ZN_3"
+  - "PERIMETER_ZN_4"
+
+# People object names for PMV output (key is the People object, NOT the zone).
+# Leave empty to auto-skip PMV; scripts/instrument_idf.py prints the real names.
+people_objects: []
+
+sensors:
+  variables:
+    - { name: "Zone Mean Air Temperature", key: "__ZONE__" }
+    - { name: "Zone Air Relative Humidity", key: "__ZONE__" }
+    - { name: "Zone Heating Setpoint Not Met Time", key: "__ZONE__" }
+    - { name: "Zone Cooling Setpoint Not Met Time", key: "__ZONE__" }
+    - { name: "Site Outdoor Air Drybulb Temperature", key: "ENVIRONMENT" }
+  meters:
+    - "Electricity:Facility"
+    - "NaturalGas:Facility"
+
+# Tier 1 hard safety limits. The clamp is applied AFTER schema validation,
+# so a hallucinated setpoint can never reach the simulation.
+limits:
+  cooling_sp_min_c: 22.0
+  cooling_sp_max_c: 28.0
+  heating_sp_min_c: 16.0
+  heating_sp_max_c: 22.0
+  min_deadband_c: 2.0
+  max_setback_c: 5.0
+  max_precool_hours: 4
+
+# Default (fallback) policy. Also the Gate-2 "hardcoded policy" baseline-beater.
+default_policy:
+  occupied_hours: [7, 19]     # inclusive start, exclusive end
+  cooling_sp_c: 24.0
+  heating_sp_c: 20.0
+  night_setback_c: 3.0
+  precool_hours: 0
+
+agent:
+  enabled: true
+  # How often the cognitive tier re-derives policy, in SIMULATION hours.
+  # 24 = once per simulated day. Lower it for the demo, raise it for annual runs.
+  cadence_sim_hours: 24
+  timeout_s: 20
+  max_retries: 2
+  aggregate_window_hours: 24
+
+llm:
+  # Written against the OpenAI-compatible /chat/completions interface.
+  #   Ollama : base_url http://localhost:11434/v1   (start with `ollama serve`)
+  #   vLLM   : base_url http://localhost:8000/v1
+  base_url: "http://localhost:11434/v1"
+  model: "llama3.1:8b"
+  api_key: "not-needed-for-local"
+  temperature: 0.2
+  max_tokens: 900
+  # Ollama and vLLM both honour this; it is the single biggest reliability win.
+  force_json: true
+
+carbon:
+  # Synthetic diurnal grid-intensity curve (gCO2/kWh). Documented assumption,
+  # swap for real ElectricityMaps/WattTime data if you have a key.
+  base_g_per_kwh: 380.0
+  peak_g_per_kwh: 620.0
+  peak_hours: [17, 21]
+  trough_hours: [1, 5]
+  trough_g_per_kwh: 250.0
+
+paths:
+  results_dir: "results"
+  store_dir: "results/store"

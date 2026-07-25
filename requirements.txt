@@ -1,0 +1,19 @@
+# Core
+pydantic>=2.6
+PyYAML>=6.0
+requests>=2.31
+
+# Dashboard
+streamlit>=1.32
+plotly>=5.19
+pandas>=2.2
+
+# MCP server
+mcp>=1.2
+
+# Dev
+pytest>=8.0
+
+# NOTE: pyenergyplus is NOT installed via pip.
+# It ships with the EnergyPlus installer. Point config.yaml -> energyplus.install_root
+# at your EnergyPlus install directory (the one containing the `pyenergyplus/` folder).
