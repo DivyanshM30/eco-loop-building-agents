@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .agent_loop import AgentLoop
 from .config import expand_sensor_specs, load_config, load_energyplus_api
+from .idf_snapshot import snapshot_summary, write_policy_snapshot
 from .llm_client import LLMClient
 from .policy_executor import (
     Limits,
@@ -105,15 +106,29 @@ def run(mode: str, cfg, run_hours_limit: float | None = None) -> Path:
     store.reset()
     box = ToolBox(cfg, store)
 
+    # Deliverable #2: materialise each installed policy as a runnable .idf.
+    gen_dir = cfg.resolve("energyplus.idf").parent / "generated"
+    snap_state = {"n": 0}
+    MAX_SNAPSHOTS = 20   # an annual run installs 365 policies; cap the artifacts
+
+    def snapshot(active, sim_hour: float, source: str, rationale: str = "") -> None:
+        if snap_state["n"] >= MAX_SNAPSHOTS:
+            return
+        snap_state["n"] += 1
+        write_policy_snapshot(
+            cfg.resolve("energyplus.idf"), gen_dir,
+            active.zone_setpoints, sim_hour, snap_state["n"], source, rationale,
+        )
+
     agent: AgentLoop | None = None
     if mode == "ai" and cfg.get_path("agent.enabled", True):
-        agent = AgentLoop(
-            cfg, store, box,
-            on_policy=lambda p: (
-                executor.set_policy(policy_to_active(p, cfg)),
-                store.record_installed_policy(p.model_dump(), p.valid_from_hour, "agent"),
-            ),
-        )
+        def on_agent_policy(p):
+            active = policy_to_active(p, cfg)
+            executor.set_policy(active)
+            store.record_installed_policy(p.model_dump(), p.valid_from_hour, "agent")
+            snapshot(active, p.valid_from_hour, "agent", p.rationale)
+
+        agent = AgentLoop(cfg, store, box, on_policy=on_agent_policy)
 
     results_dir = cfg.resolve("paths.results_dir")
     csv_path = results_dir / f"run_{mode}.csv"
@@ -201,8 +216,10 @@ def run(mode: str, cfg, run_hours_limit: float | None = None) -> Path:
                     from .schemas import parse_policy
                     pol, _ = parse_policy(proposal.get("policy", {}))
                     if pol is not None:
-                        executor.set_policy(policy_to_active(pol, cfg))
+                        active = policy_to_active(pol, cfg)
+                        executor.set_policy(active)
                         store.record_installed_policy(pol.model_dump(), sample.sim_hour, "mcp")
+                        snapshot(active, sample.sim_hour, "mcp", pol.rationale)
 
                 if agent is not None and sample.sim_hour - counters["last_agent_hour"] >= cadence:
                     counters["last_agent_hour"] = sample.sim_hour
@@ -238,6 +255,10 @@ def run(mode: str, cfg, run_hours_limit: float | None = None) -> Path:
             counters["errors"] += 1
             if counters["errors"] <= 5:
                 print(f"[warn] timestep error #{counters['errors']}: {exc!r}", file=sys.stderr)
+
+    # Static mode installs exactly one policy, so snapshot it up front.
+    if mode == "static":
+        snapshot(executor.active, 0.0, "static (config default_policy)")
 
     bus.request_variables(state)  # Rule 1: before the run, not after
     api.runtime.callback_end_zone_timestep_after_zone_reporting(state, on_timestep)
@@ -284,6 +305,9 @@ def run(mode: str, cfg, run_hours_limit: float | None = None) -> Path:
           f"policy_source={executor.active.source}")
     if agent is not None:
         print(f"[tier2] {agent.stats()}")
+    snaps = snapshot_summary(gen_dir)
+    if snaps["count"]:
+        print(f"[models] {snaps['count']} runtime policy snapshot(s) -> {gen_dir}")
     print(f"[csv] {csv_path}")
 
     if counters["bind_failed"]:

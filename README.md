@@ -143,3 +143,13 @@ pytest -q
 The tests are the evidence for the safety claims: absurd setpoints, NaN, inf,
 zero deadband, unknown zone names, and fallback-to-default all get clamped or
 handled without raising.
+
+---
+
+<div align="center">
+
+**Made by Divyansh Mishra**
+
+[GitHub](https://github.com/DivyanshM30) · [Portfolio](https://divyanshm.dev/) · [LinkedIn](https://linkedin.com/in/divyanshm30)
+
+</div>
