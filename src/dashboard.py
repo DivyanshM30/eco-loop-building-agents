@@ -56,7 +56,14 @@ st.title("Eco-Loop Building Agents")
 st.caption("Autonomous closed-loop control of an EnergyPlus building model via an open-source LLM")
 
 base = load_csv("run_baseline.csv")
-ai = load_csv("run_ai.csv") or load_csv("run_static.csv")
+
+# Explicit `is None` checks: `a or b` on DataFrames calls __bool__, which pandas
+# raises on ("truth value of a DataFrame is ambiguous").
+ai = load_csv("run_ai.csv")
+ai_label = "AI closed loop"
+if ai is None:
+    ai = load_csv("run_static.csv")
+    ai_label = "Static policy (no LLM)"
 
 if base is None or ai is None:
     st.warning(
@@ -97,7 +104,7 @@ st.divider()
 
 st.subheader("1. Cumulative energy — baseline vs AI-driven closed loop")
 fig = go.Figure()
-for df, label, dash in ((base, "Baseline (stock schedules)", "dash"), (ai, "AI closed loop", None)):
+for df, label, dash in ((base, "Baseline (stock schedules)", "dash"), (ai, ai_label, None)):
     cum = (df["electricity_kwh"] + df["gas_kwh"]).cumsum()
     fig.add_trace(go.Scatter(
         x=df["sim_hour"], y=cum, name=label,
