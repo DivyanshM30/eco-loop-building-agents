@@ -35,6 +35,59 @@ reaching the simulation — see `tests/test_policy_executor.py`.
 
 ---
 
+## Results
+
+7-day July A/B on the DOE reference small office (Chicago TMY3). Identical model,
+identical weather — only the controller differs. Policy authored by `llama3.2:3b`
+running locally, temperature 0, so the run is reproducible.
+
+| Metric | Baseline | Eco-Loop | Change |
+|---|---|---|---|
+| Electricity | 1251.97 kWh | 1167.33 kWh | **−6.76 %** |
+| Total energy | 1309.46 kWh | 1225.14 kWh | **−6.44 %** |
+| Peak demand | 18.97 kW | 17.52 kW | **−7.64 %** |
+| Mean occupied PMV | −0.391 | **+0.140** | toward neutral |
+| PMV within comfort band | 82.8 % | **97.3 %** | +14.5 pp |
+
+Energy **and** comfort improved together: the stock schedule overcools (PMV
+−0.39), so raising the occupied cooling setpoint cuts cooling energy while moving
+comfort toward neutral. The LLM-authored policy also beats a hand-tuned static
+policy (−5.08 %) on the same model.
+
+### Cumulative energy — baseline vs closed loop
+
+![Cumulative energy, baseline vs Eco-Loop](docs/screenshots/01-cumulative-energy.png)
+
+### Thermal comfort — occupied hours only
+
+PMV distribution against the shaded ASHRAE 55 comfort band. Comfort is scored only
+while zones are actually occupied; measuring an empty building penalises correct
+setback.
+
+![PMV distribution against the ASHRAE comfort band](docs/screenshots/02-comfort-pmv.png)
+
+### Control actions in the loop
+
+Zone and outdoor temperature, with vertical markers where the agent installed a
+new policy.
+
+![Zone temperature with policy-change markers](docs/screenshots/03-setpoints-timeline.png)
+
+### Agent behaviour — tool calls, rejections, self-correction
+
+![Agent metrics: invocations, policies installed, rejections, self-corrections](docs/screenshots/04-agent-trace.png)
+
+The model proposed an invalid setpoint, `commit_policy` rejected it with the
+offending field and reason, that text was appended to the retry prompt, and the
+corrected policy was accepted on attempt 2 — visible in the trace as two
+`llm_response` events at the same `sim_hour`.
+
+![Agent trace table](docs/screenshots/04-agent-trace-tables.png)
+
+Reproduce all of the above with `streamlit run src/dashboard.py`.
+
+---
+
 ## Quick start
 
 ```bash
