@@ -32,3 +32,4 @@ models/generated/*.idf
 
 .DS_Store
 .pytest_cache/
+docs/video_script.md

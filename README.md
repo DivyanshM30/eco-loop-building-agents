@@ -127,8 +127,9 @@ python -m src.mcp_server
 | 2 | Building models (`.idf`) | `models/baseline.idf`, `models/ai_instrumented.idf`, `models/generated/` |
 | 3 | Quantitative savings dashboard | `src/dashboard.py`, `scripts/compare_runs.py` → `results/comparison.json` |
 | 4 | System architecture document | `docs/architecture.md`, `docs/prompt_engineering.md` |
-| 5 | PoC demonstration video (≤3 min) | see `docs/architecture.md` § Demo script |
-|   | Presentation | `deck/` (template provided; export to **PDF** for upload) |
+| 5 | PoC demonstration video (≤3 min) | **[Watch the demo](https://drive.google.com/drive/folders/1BnIvuYQWBIXOHk3vVQ0LGkk2cF6vWLvq?usp=sharing)** · script in `docs/video_script.md` |
+|   | Presentation | `deck/Eco-Loop_IDEA_Submission.pdf` (built from the provided template) |
+|   | Dashboard screenshots | `docs/screenshots/` |
 
 Submission format: **PDF or ZIP only.**
 

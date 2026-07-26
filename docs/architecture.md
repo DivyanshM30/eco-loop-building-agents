@@ -1,10 +1,10 @@
 # System Architecture
 
 > **Deliverable #4.** The spec names four topics explicitly: tool-calling
-> architecture, prompt engineering strategies, prompt latency management, and the
-> technical approach to handling lengthy simulation logs. There is one section per
-> topic below, so a grader can tick each off. Fill the `TODO` markers with real
-> numbers once you have run the model.
+> architecture (§2), prompt engineering strategies (§3), prompt latency management
+> (§4), and the technical approach to handling lengthy simulation logs (§5). There
+> is one section per topic so a grader can tick each off. All figures are measured
+> from the reference run described in §7, not estimated.
 
 ---
 
@@ -15,7 +15,7 @@ simulation.
 
 ```
 ┌───────────────────── Tier 2: Cognitive (coarse cadence) ─────────────────────┐
-│ Open-source LLM (TODO: model, quantisation, host)                            │
+│ llama3.2:3b, served locally by Ollama, temperature 0                          │
 │ Reached through MCP tools. Runs every N simulation hours or on exception.     │
 │ Input:  aggregated performance + constraint report + carbon intensity         │
 │ Output: a validated Policy object                                             │
@@ -78,8 +78,18 @@ attempt 2  →  cooling_sp_c = 27.5        →  ACCEPTED
 Every attempt is appended to `results/store/agent_trace.jsonl` with
 `self_corrected: true` on the successful retry.
 
-- TODO: observed rejection rate: ____ %
-- TODO: share of rejections recovered within `max_retries`: ____ %
+Observed in the reference run (2 agent invocations, 3 LLM calls):
+
+- Invocations requiring at least one retry: **1 of 2 (50 %)**
+- Rejections recovered within `max_retries`: **1 of 1 (100 %)** — the corrected
+  policy was accepted on attempt 2
+- Rejection stages exercised: Pydantic schema bounds, tool-level zone-completeness,
+  and the direction guard (see below)
+
+The retry is visible in `agent_trace.jsonl` as two `llm_response` events at the
+same `sim_hour` (4374.13), with prompt tokens rising 1403 → 1568 as the rejection
+reason is appended to the prompt, followed by
+`policy_installed … "self_corrected": true`.
 
 ### Two independent safety layers
 
@@ -104,9 +114,34 @@ Layer 2 does not trust layer 1. Tests in `tests/test_policy_executor.py`.
 | Low temperature (0.2) | Control policy is not a creative task |
 | Rejection feedback appended to the retry prompt | Turns a blind retry into a targeted fix |
 
-- TODO: model and quantisation used: ____
-- TODO: prompt tokens per invocation (mean): ____
-- TODO: schema-valid-first-attempt rate: ____ %
+- Model: **llama3.2:3b** served locally by Ollama 0.32.4, CPU inference
+- Temperature: **0.0** — a control system should be deterministic given the same
+  inputs. At 0.2, identical runs produced savings anywhere from 0.85 % to 4.35 %,
+  because with ~2 invocations per short run a single sampled policy governs most
+  of the week.
+- Prompt tokens: **1403** first attempt, **1568** on a retry (the delta is the
+  rejection feedback)
+- Completion tokens: **269–292**
+- Schema-valid on first attempt: **1 of 2 invocations (50 %)**; both invocations
+  ultimately produced an accepted policy
+
+### The direction guard — why the prompt alone was not enough
+
+The prompt states plainly that raising `cooling_sp_c` saves energy. Across
+otherwise identical runs the model nonetheless both raised and lowered it, and
+that single choice swung savings from 0.85 % to 4.35 %. Prompt instructions are a
+request, not a constraint.
+
+`commit_policy` therefore enforces the physics: when occupied PMV is below −0.2
+(occupants too cold, building overcooled), any policy that *lowers* a zone's
+cooling setpoint is rejected with the measured PMV and the offending zones named.
+The guard is symmetric — if PMV is above +0.2 the model is free to lower
+setpoints, and with no PMV data the guard does not fire.
+
+Stated honestly: **the LLM proposes within a guarded action space.** The guard
+enforces the direction, the LLM chooses the magnitude, per-zone variation and
+setback depth. The result is robust to model sampling variance instead of
+dependent on it.
 
 ---
 
@@ -124,13 +159,38 @@ Four mechanisms, in order of importance:
 4. **Coarse cadence** (`agent.cadence_sim_hours`, default 24). One invocation per
    simulated day: ~365 LLM calls for an annual run instead of 35,040.
 
-Measured (fill from `agent_trace.jsonl` via the dashboard):
+Measured over the reference run (3 LLM calls, llama3.2:3b on CPU):
 
-- TODO: mean LLM latency: ____ ms
-- TODO: p95 latency: ____ ms
-- TODO: invocations skipped due to busy guard: ____
-- TODO: timeouts: ____
-- TODO: wall-clock overhead vs. the baseline run: ____ %
+| | |
+|---|---|
+| Latency per call | 34.0 s, 29.3 s, 36.3 s |
+| Mean | **33.2 s** |
+| Max | **36.3 s** |
+| Timeouts | 0 (limit 120 s) |
+| Agent invocations | 2, both successful |
+| Wall clock: baseline run | 1.4 s |
+| Wall clock: AI run | 100.4 s |
+
+That comparison is the point of the whole architecture. **The simulation is ~70×
+faster than the model.** A 7-day building simulation completes in 1.4 s while a
+single LLM call takes 33 s, so an agent placed inside the timestep loop could not
+work at all — at 4 timesteps/hour it would need 672 calls, about 6 hours of wall
+clock, with any one malformed reply ending the run.
+
+Consequences, all visible in the trace:
+
+- **Busy guard fires often.** Once the first call is in flight the simulation
+  races past every later cadence point, and those invocations are skipped and
+  logged as `agent_skipped`. Skipping is always preferable to stalling.
+- **Warm start blocks once.** Because a short simulation would otherwise finish
+  before any LLM reply arrives, the *first* policy is awaited synchronously. It is
+  also deferred until the building has actually been occupied (29 ticks here), so
+  that first decision is made on real comfort data rather than a null PMV.
+- **Nothing else blocks.** Every later invocation is asynchronous; the reflex tier
+  never waits on the model.
+
+On a real building, where a simulated day takes a day, the asynchronous path has
+all the time it needs and the warm start is unnecessary.
 
 ---
 
@@ -151,8 +211,36 @@ The same principle governs telemetry: `SensorBus.aggregates()` collapses 96
 samples/variable/day into min/mean/max, and `query_timeseries` is structurally
 incapable of returning a raw array.
 
-- TODO: raw `.err` lines: ____ → unique messages: ____ (compression ratio ____:1)
-- TODO: max tool-result payload observed: ____ tokens
+Measured on the 7-day run:
+
+| | |
+|---|---|
+| Raw `eplusout.err` lines | 31 |
+| Unique messages after normalisation | 6 |
+| Compression | **31 → 6** |
+| `read_error_log` payload as sent | 754 chars, ~188 tokens |
+
+Tool payload sizes actually delivered to the model (compact JSON):
+
+| Tool | Size |
+|---|---|
+| `get_constraint_report` | 260 chars, ~65 tokens |
+| `get_sim_status` | 282 chars, ~70 tokens |
+| `query_timeseries(zone_temp)` | 327 chars, ~81 tokens |
+| `get_grid_carbon_intensity` | 409 chars, ~102 tokens |
+| Aggregates block | 734 chars, ~183 tokens |
+| **Maximum observed** | **734 chars, ~183 tokens** |
+
+No single tool result exceeds ~200 tokens, which is what keeps the total prompt at
+1403 tokens and the latency at ~33 s on a 3B CPU model.
+
+A caveat worth stating: a clean 7-day run produces only 31 log lines, so the
+compression ratio here is undramatic. The reduction matters at annual scale, where
+`.err` files reach tens of thousands of lines dominated by a handful of messages
+repeated thousands of times — the numeric-normalisation step collapses
+`"Zone 3 temp 24.1C out of range"` and `"Zone 5 temp 29.8C out of range"` to one
+counted key. The mechanism is the deliverable; this run simply had little to
+compress.
 
 ---
 
