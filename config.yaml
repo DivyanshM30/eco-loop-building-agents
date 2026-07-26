@@ -3,11 +3,16 @@
 
 energyplus:
   # Directory containing the `pyenergyplus/` package (the EnergyPlus install root).
-  # Windows : C:/EnergyPlusV24-1-0
-  # Linux   : /usr/local/EnergyPlus-24-1-0
-  # macOS   : /Applications/EnergyPlus-24-1-0
-  install_root: "C:/EnergyPlusV24-1-0"
-  epw: "C:/EnergyPlusV24-1-0/WeatherData/USA_IL_Chicago-OHare.Intl.AP.725300_TMY3.epw"
+  # Use FORWARD slashes: this is YAML, so "\" in a quoted string is an escape char.
+  # Windows : C:/EnergyPlusV26-1-0
+  # Linux   : /usr/local/EnergyPlus-26-1-0
+  # macOS   : /Applications/EnergyPlus-26-1-0
+  #
+  # After installing, confirm the real folder name — the version suffix must match:
+  #   Get-ChildItem C:\ -Directory -Filter 'EnergyPlus*' |
+  #     Where-Object { Test-Path (Join-Path $_.FullName 'pyenergyplus') }
+  install_root: "D:/Applications/Energyplus"
+  epw: "D:/Applications/Energyplus/WeatherData/USA_IL_Chicago-OHare.Intl.AP.725300_TMY3.epw"
 
   # Swap the model freely — see scripts/instrument_idf.py to prepare a new one.
   # Option A (recommended, realistic loads):
@@ -35,18 +40,35 @@ zones:
 
 # People object names for PMV output (key is the People object, NOT the zone).
 # Leave empty to auto-skip PMV; scripts/instrument_idf.py prints the real names.
-people_objects: []
+people_objects:
+  - "CORE_ZN PEOPLE"
+  - "PERIMETER_ZN_1 PEOPLE"
+  - "PERIMETER_ZN_2 PEOPLE"
+  - "PERIMETER_ZN_3 PEOPLE"
+  - "PERIMETER_ZN_4 PEOPLE"
 
 sensors:
   variables:
     - { name: "Zone Mean Air Temperature", key: "__ZONE__" }
+    # Occupant count is what makes comfort scoring honest: PMV and unmet hours
+    # are only meaningful when someone is actually in the zone. Without this,
+    # night/weekend setback hours drag the comfort metrics down and a correct
+    # energy-saving policy looks like a comfort regression.
+    - { name: "Zone People Occupant Count", key: "__ZONE__" }
     - { name: "Zone Air Relative Humidity", key: "__ZONE__" }
     - { name: "Zone Heating Setpoint Not Met Time", key: "__ZONE__" }
     - { name: "Zone Cooling Setpoint Not Met Time", key: "__ZONE__" }
     - { name: "Site Outdoor Air Drybulb Temperature", key: "ENVIRONMENT" }
+  # role -> meter name. The ROLE is what the code refers to; the NAME is
+  # model-specific, so only this file needs to change between models.
+  #
+  # 'Electricity:Facility' does NOT exist in every model — RefBldgSmallOffice
+  # exposes ElectricityPurchased:Facility / ElectricityNet:Facility instead.
+  # Run `python scripts/dump_api_data.py` to see what your model actually has.
+  # With no on-site generation, Purchased == Net.
   meters:
-    - "Electricity:Facility"
-    - "NaturalGas:Facility"
+    electricity: "ElectricityPurchased:Facility"
+    gas: "NaturalGas:Facility"
 
 # Tier 1 hard safety limits. The clamp is applied AFTER schema validation,
 # so a hallucinated setpoint can never reach the simulation.
@@ -60,11 +82,21 @@ limits:
   max_precool_hours: 4
 
 # Default (fallback) policy. Also the Gate-2 "hardcoded policy" baseline-beater.
+#
+# Tuned from the first honest A/B run, which showed baseline PMV of -0.39 during
+# occupied hours: the stock schedule OVERCOOLS. Raising the occupied cooling
+# setpoint therefore saves energy AND moves comfort toward neutral — the two
+# goals are aligned here, not in tension.
+#
+# occupied_hours is only a fallback: when 'Zone People Occupant Count' is
+# available, setback follows measured occupancy, which correctly handles
+# weekends. A clock-only rule conditions the building all weekend and loses to
+# the baseline.
 default_policy:
-  occupied_hours: [7, 19]     # inclusive start, exclusive end
-  cooling_sp_c: 24.0
+  occupied_hours: [7, 19]     # fallback only; inclusive start, exclusive end
+  cooling_sp_c: 25.5          # was 24.0 — baseline overcools (PMV -0.39)
   heating_sp_c: 20.0
-  night_setback_c: 3.0
+  night_setback_c: 4.0        # deeper unoccupied setback
   precool_hours: 0
 
 agent:

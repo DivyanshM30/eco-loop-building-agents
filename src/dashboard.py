@@ -118,6 +118,9 @@ with col_a:
     if "mean_pmv" in ai.columns and ai["mean_pmv"].notna().any():
         fig2 = go.Figure()
         for df, label in ((base, "Baseline"), (ai, "AI")):
+            # Occupied hours only: PMV in an empty building is not a comfort result.
+            if "occupants" in df.columns:
+                df = df[pd.to_numeric(df["occupants"], errors="coerce").fillna(0) > 0]
             vals = pd.to_numeric(df["mean_pmv"], errors="coerce").dropna()
             if not vals.empty:
                 fig2.add_trace(go.Histogram(x=vals, name=label, opacity=0.65, nbinsx=40))

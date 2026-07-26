@@ -135,6 +135,59 @@ def test_case_insensitive_zone_names():
     assert c == 25.0
 
 
+# ------------------------------------------------- measured-occupancy override
+
+def test_measured_occupancy_overrides_the_clock():
+    """A weekday-hour timestep with nobody present must get setback.
+
+    This is the weekend bug: clock-only logic held the occupied setpoint on
+    Saturday afternoon and burned more energy than the baseline schedule.
+    """
+    ex = make_executor()
+    ex.set_policy(
+        ActivePolicy(zone_setpoints={"CORE_ZN": (20.0, 25.0)}, night_setback_c=4.0)
+    )
+    _, cool_clock_occupied = ex.compute("CORE_ZN", hour=12, occupied=True)
+    _, cool_actually_empty = ex.compute("CORE_ZN", hour=12, occupied=False)
+    assert cool_clock_occupied == 25.0
+    assert cool_actually_empty > cool_clock_occupied, "empty building must be setback"
+
+
+def test_measured_occupancy_conditions_outside_clock_window():
+    """Someone working at 22:00 should get the occupied band, not setback."""
+    ex = make_executor()
+    ex.set_policy(
+        ActivePolicy(zone_setpoints={"CORE_ZN": (20.0, 25.0)}, night_setback_c=4.0)
+    )
+    heat, cool = ex.compute("CORE_ZN", hour=22, occupied=True)
+    assert (heat, cool) == (20.0, 25.0)
+
+
+def test_none_falls_back_to_clock_window():
+    ex = make_executor()
+    ex.set_policy(
+        ActivePolicy(zone_setpoints={"CORE_ZN": (20.0, 25.0)}, night_setback_c=4.0)
+    )
+    _, cool_day = ex.compute("CORE_ZN", hour=12, occupied=None)
+    _, cool_night = ex.compute("CORE_ZN", hour=3, occupied=None)
+    assert cool_day == 25.0
+    assert cool_night > cool_day
+
+
+def test_precool_never_overrides_measured_occupancy():
+    ex = make_executor()
+    ex.set_policy(
+        ActivePolicy(
+            zone_setpoints={"CORE_ZN": (20.0, 26.0)},
+            night_setback_c=3.0,
+            precool_hours=2,
+        )
+    )
+    # hour 6 is inside the precool window, but someone is present
+    heat, cool = ex.compute("CORE_ZN", hour=6, occupied=True)
+    assert (heat, cool) == (20.0, 26.0), "occupied band must win over precool"
+
+
 def test_compute_is_cheap_and_counted():
     ex = make_executor()
     for _ in range(1000):

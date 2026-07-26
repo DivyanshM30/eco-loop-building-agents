@@ -109,8 +109,16 @@ class PolicyExecutor:
 
     # ------------------------------------------------------------------ the loop
 
-    def compute(self, zone: str, hour: float) -> tuple[float, float]:
+    def compute(self, zone: str, hour: float, occupied: bool | None = None) -> tuple[float, float]:
         """Return (heating_setpoint_c, cooling_setpoint_c) for this zone and hour.
+
+        `occupied` should be the MEASURED occupancy for this zone. Pass None to
+        fall back to the clock window.
+
+        Prefer the measured signal: a clock-only rule cannot tell Saturday from
+        Tuesday, so it conditions an empty building all weekend and burns more
+        energy than the baseline schedule it was meant to beat. That is not a
+        hypothetical — it cost 1.5% extra electricity on the first real A/B run.
 
         This is the only function on the critical path. Total cost: a few
         comparisons and additions.
@@ -123,9 +131,13 @@ class PolicyExecutor:
         )
 
         h = int(hour) % 24
-        occupied = pol.occupied_start <= h < pol.occupied_end
+        if occupied is None:
+            occupied = pol.occupied_start <= h < pol.occupied_end
+        # Precool only ahead of the clock-scheduled occupied window. Gated on
+        # `not occupied` so it never fights the occupied band.
         precool_window = (
-            pol.precool_hours > 0
+            not occupied
+            and pol.precool_hours > 0
             and (pol.occupied_start - pol.precool_hours) <= h < pol.occupied_start
         )
 
