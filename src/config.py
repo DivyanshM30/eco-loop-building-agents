@@ -84,7 +84,24 @@ def load_energyplus_api(cfg: Config):
     return EnergyPlusAPI()
 
 
-def expand_sensor_specs(cfg: Config) -> tuple[list[dict], list[str]]:
+def meter_roles(cfg: Config) -> dict[str, str]:
+    """Return {role: meter_name}, e.g. {'electricity': 'ElectricityPurchased:Facility'}.
+
+    Roles decouple the code from model-specific meter names. Accepts the legacy
+    list form too, inferring the role from the name.
+    """
+    raw = cfg.get_path("sensors.meters", {}) or {}
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items()}
+    roles: dict[str, str] = {}
+    for name in raw:
+        low = str(name).lower()
+        role = "gas" if ("gas" in low and "electric" not in low) else "electricity"
+        roles[role] = str(name)
+    return roles
+
+
+def expand_sensor_specs(cfg: Config) -> tuple[list[dict], dict[str, str]]:
     """Expand the '__ZONE__' placeholder in sensor specs into per-zone entries."""
     zones = [str(z).upper() for z in cfg.get_path("zones", [])]
     people = [str(p).upper() for p in cfg.get_path("people_objects", []) or []]
@@ -102,8 +119,7 @@ def expand_sensor_specs(cfg: Config) -> tuple[list[dict], list[str]]:
     for p in people:
         out.append({"name": "Zone Thermal Comfort Fanger Model PMV", "key": p})
 
-    meters = [str(m) for m in cfg.get_path("sensors.meters", [])]
-    return out, meters
+    return out, meter_roles(cfg)
 
 
 def carbon_intensity(cfg: Config, hour: int) -> float:

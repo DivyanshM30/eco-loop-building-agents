@@ -36,7 +36,7 @@ CSV_HEADER = [
     "electricity_kwh", "gas_kwh",
     "cum_electricity_kwh", "cum_gas_kwh",
     "unmet_heating_h", "unmet_cooling_h",
-    "mean_zone_c", "mean_pmv", "policy_source",
+    "mean_zone_c", "mean_pmv", "occupants", "policy_source",
 ]
 
 
@@ -123,19 +123,37 @@ def run(mode: str, cfg, run_hours_limit: float | None = None) -> Path:
 
     cadence = float(cfg.get_path("agent.cadence_sim_hours", 24))
     window = int(cfg.get_path("agent.aggregate_window_hours", 24))
-    counters = {"steps": 0, "warmup_skipped": 0, "last_agent_hour": -1e9, "errors": 0}
+    counters = {"steps": 0, "warmup_skipped": 0, "last_agent_hour": -1e9, "errors": 0,
+                "bind_failed": False, "bind_reported": False, "design_day_skipped": 0}
     t_start = time.time()
 
     def on_timestep(s):
         # Rule 2: handles are invalid until the API says data is ready.
         if not bus.bind(s):
             return
-        if counters["steps"] == 0:
-            bus.assert_bound_ok()
+
+        # Bind failure: report ONCE and go inert. Raising here would be swallowed
+        # by the ctypes boundary and repeated every timestep, burying the message.
+        if counters["bind_failed"]:
+            return
+        if bus.bind_errors and not counters["bind_reported"]:
+            counters["bind_reported"] = True
+            counters["bind_failed"] = True
+            print("\n" + "=" * 70, file=sys.stderr)
+            print(bus.bind_error_report(), file=sys.stderr)
+            print("=" * 70, file=sys.stderr)
+            print("Simulation will finish but no data is being collected.\n", file=sys.stderr)
+            return
 
         # Rule 3: warmup data is not physical, never use it.
         if bus.is_warmup(s):
             counters["warmup_skipped"] += 1
+            return
+
+        # Rule 4: design-day environments are not the RunPeriod. Excluding them
+        # is what keeps the A/B comparison honest.
+        if not bus.is_weather_run(s):
+            counters["design_day_skipped"] += 1
             return
 
         try:
@@ -144,7 +162,16 @@ def run(mode: str, cfg, run_hours_limit: float | None = None) -> Path:
             # --- Tier 1: always runs, pure arithmetic, cannot block -----------
             if mode in ("static", "ai"):
                 for zone in zones:
-                    heat, cool = executor.compute(zone, sample.hour)
+                    # Measured per-zone occupancy drives setback. Falls back to
+                    # building-wide occupancy, then to the clock, so a model
+                    # without occupant-count output still works.
+                    if zone in sample.zone_occupants:
+                        occupied = sample.zone_occupants[zone] > 0.0
+                    elif sample.zone_occupants:
+                        occupied = sample.occupants > 0.0
+                    else:
+                        occupied = None
+                    heat, cool = executor.compute(zone, sample.hour, occupied)
                     sample.setpoints[zone] = (heat, cool)
                     bus.write_setpoints(s, zone, heat, cool)
 
@@ -197,11 +224,12 @@ def run(mode: str, cfg, run_hours_limit: float | None = None) -> Path:
                 round(sample.sim_hour, 3), sample.month, sample.day, sample.hour, sample.minute,
                 round(sample.outdoor_c, 2),
                 round(sample.electricity_kwh, 6), round(sample.gas_kwh, 6),
-                round(bus.total_j.get("Electricity:Facility", 0.0) / 3.6e6, 4),
-                round(bus.total_j.get("NaturalGas:Facility", 0.0) / 3.6e6, 4),
+                round(bus.total_j.get("electricity", 0.0) / 3.6e6, 4),
+                round(bus.total_j.get("gas", 0.0) / 3.6e6, 4),
                 round(sample.unmet_heating_h, 4), round(sample.unmet_cooling_h, 4),
                 round(mean_zone, 3),
                 round(mean_pmv, 3) if mean_pmv != "" else "",
+                round(sample.occupants, 2),
                 executor.active.source,
             ])
 
@@ -231,17 +259,41 @@ def run(mode: str, cfg, run_hours_limit: float | None = None) -> Path:
     api.state_manager.delete_state(state)
 
     elapsed = time.time() - t_start
-    elec = bus.total_j.get("Electricity:Facility", 0.0) / 3.6e6
-    gas = bus.total_j.get("NaturalGas:Facility", 0.0) / 3.6e6
+    elec = bus.total_j.get("electricity", 0.0) / 3.6e6
+    gas = bus.total_j.get("gas", 0.0) / 3.6e6
     print(f"[done] exit={exit_code} steps={counters['steps']} "
-          f"warmup_skipped={counters['warmup_skipped']} errors={counters['errors']} "
-          f"wall={elapsed:.1f}s")
+          f"warmup_skipped={counters['warmup_skipped']} "
+          f"design_days_skipped={counters['design_day_skipped']} "
+          f"errors={counters['errors']} wall={elapsed:.1f}s")
+
+    # Report the simulated span explicitly. A non-contiguous span (e.g. 01-21
+    # and 07-21) means design days leaked in; a span far shorter than the
+    # RunPeriod means it never ran.
+    if bus.history:
+        first, last = bus.history[0], bus.history[-1]
+        span_h = last.sim_hour - first.sim_hour
+        print(f"[span] {first.month:02d}-{first.day:02d} {first.hour:02d}:00 "
+              f"-> {last.month:02d}-{last.day:02d} {last.hour:02d}:00 "
+              f"({span_h / 24:.1f} days, {len(bus.history)} samples)")
+        expected = len(bus.history) / 4.0  # hours at 4 timesteps/hour
+        if span_h > 0 and expected / (span_h + 1e-9) < 0.9:
+            print("[warn] sample count is well below the span — the period may be "
+                  "discontinuous (design days?). Check the CSV dates.")
     print(f"[energy] electricity={elec:.1f} kWh  gas={gas:.1f} kWh")
     print(f"[tier1] applied={executor.applied_count} fallbacks={executor.fallback_count} "
           f"policy_source={executor.active.source}")
     if agent is not None:
         print(f"[tier2] {agent.stats()}")
     print(f"[csv] {csv_path}")
+
+    if counters["bind_failed"]:
+        print("\n[FAILED] handle binding failed — no data collected. See the error above.",
+              file=sys.stderr)
+        raise SystemExit(2)
+    if counters["steps"] == 0:
+        print("\n[FAILED] zero timesteps recorded. Check the RunPeriod in your IDF.",
+              file=sys.stderr)
+        raise SystemExit(2)
     return csv_path
 
 

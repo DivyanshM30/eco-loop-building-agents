@@ -51,6 +51,10 @@ RP_BEGIN_DAY = 3
 RP_END_MONTH = 5
 RP_END_DAY = 6
 
+# SimulationControl field indices
+SC_RUN_SIZING_PERIODS = 4    # 'Run Simulation for Sizing Periods'
+SC_RUN_WEATHER_PERIODS = 5   # 'Run Simulation for Weather File Run Periods'
+
 
 def get_field(obj: dict, idx: int) -> str:
     fields = obj["fields"]
@@ -73,18 +77,55 @@ def name_of(obj: dict) -> str:
     return get_field(obj, F_NAME)
 
 
+def thermostatted_zones(objects: list[dict]) -> set[str]:
+    """Zones that have a thermostat, i.e. the only ones we can actuate.
+
+    A 'Zone Temperature Control' actuator only exists where a
+    ZoneControl:Thermostat points at the zone. Listing an unconditioned zone
+    (attics, plenums, crawlspaces) in config.yaml yields handle -1 and aborts
+    the run, so filter them out here rather than letting the user discover it
+    at the first timestep.
+    """
+    controlled: set[str] = set()
+    for obj in find(objects, "ZoneControl:Thermostat"):
+        zone = get_field(obj, 2)  # 'Zone or ZoneList Name'
+        if zone:
+            controlled.add(zone.upper())
+    return controlled
+
+
 def report(objects: list[dict]) -> None:
-    zones = [name_of(o) for o in find(objects, "Zone")]
+    all_zones = [name_of(o) for o in find(objects, "Zone")]
     people = [name_of(o) for o in find(objects, "People")]
+    controlled = thermostatted_zones(objects)
+
+    # If no thermostats were found at all, fall back to listing every zone
+    # rather than emitting an empty block.
+    if controlled:
+        conditioned = [z for z in all_zones if z.upper() in controlled]
+        unconditioned = [z for z in all_zones if z.upper() not in controlled]
+    else:
+        conditioned, unconditioned = all_zones, []
+
     print("\n--- Paste into config.yaml ---\n")
     print("zones:")
-    for z in zones:
+    for z in conditioned:
         print(f'  - "{z.upper()}"')
     print("\npeople_objects:")
     for p in people:
         print(f'  - "{p.upper()}"')
     print("\n(zone/people names are UPPERCASE in the EnergyPlus API)")
-    print(f"\n{len(zones)} zones, {len(people)} People objects\n")
+
+    if unconditioned:
+        print(f"\n[skipped] {len(unconditioned)} zone(s) have no thermostat and were "
+              "left OUT of the list above:")
+        for z in unconditioned:
+            print(f"    {z.upper()}")
+        print("    Adding them would fail handle binding: no 'Zone Temperature "
+              "Control' actuator exists for an unconditioned zone.")
+
+    print(f"\n{len(conditioned)} controllable of {len(all_zones)} zones, "
+          f"{len(people)} People objects\n")
 
 
 def ensure_constant_schedule(objects: list[dict], name: str, value: float) -> bool:
@@ -197,6 +238,35 @@ def shorten_run_period(objects: list[dict], days: int) -> bool:
     return True
 
 
+def ensure_weather_run_period(objects: list[dict]) -> str:
+    """Force EnergyPlus to simulate the RunPeriod, not just the design days.
+
+    THE most expensive trap in this project. If 'Run Simulation for Weather File
+    Run Periods' is No (or 'Run Simulation for Sizing Periods' is Yes), the run
+    silently produces only the sizing-period days — typically 21 January and
+    21 July. Everything appears to work: exit code 0, no warnings, plausible
+    energy totals. But you are looking at two design days, not a week, and the
+    heating-dominated winter design day makes gas savings look enormous.
+
+    Symptom to watch for: the CSV spans two non-contiguous days months apart.
+    """
+    scs = find(objects, "SimulationControl")
+    if not scs:
+        objects.append({
+            "type": "SimulationControl",
+            "fields": ["Yes", "Yes", "Yes", "No", "Yes"],
+        })
+        return "added SimulationControl (sizing periods No, weather RunPeriods Yes)"
+
+    sc = scs[0]
+    before_sizing = get_field(sc, SC_RUN_SIZING_PERIODS) or "(blank)"
+    before_weather = get_field(sc, SC_RUN_WEATHER_PERIODS) or "(blank)"
+    set_field(sc, SC_RUN_SIZING_PERIODS, "No")
+    set_field(sc, SC_RUN_WEATHER_PERIODS, "Yes")
+    return (f"SimulationControl: run-sizing-periods {before_sizing} -> No, "
+            f"run-weather-run-periods {before_weather} -> Yes")
+
+
 def ensure_timestep(objects: list[dict], per_hour: int = 4) -> None:
     ts = find(objects, "Timestep")
     if ts:
@@ -236,6 +306,7 @@ def main() -> int:
     # Baseline copy: same model, same outputs, but the controller writes nothing.
     baseline_objects = parse_idf_objects(src)
     ensure_timestep(baseline_objects, args.timestep)
+    ensure_weather_run_period(baseline_objects)
     people_names = [name_of(o) for o in find(baseline_objects, "People")]
     enable_fanger(baseline_objects)
     add_output_variables(baseline_objects, people_names)
@@ -248,6 +319,7 @@ def main() -> int:
 
     # AI copy: identical plus EMS reporting so we get eplusout.edd.
     ensure_timestep(objects, args.timestep)
+    simctl_msg = ensure_weather_run_period(objects)
     touched, added_scheds = enable_fanger(objects)
     ems = add_ems_reporting(objects)
     n_vars = add_output_variables(objects, people_names)
@@ -258,7 +330,8 @@ def main() -> int:
     out_path.write_text(serialize_idf_objects(objects), encoding="utf-8")
     print(f"[write] {out_path}")
 
-    print(f"\n[fanger]   enabled on {touched} People object(s)")
+    print(f"\n[simctl]   {simctl_msg}")
+    print(f"[fanger]   enabled on {touched} People object(s)")
     if added_scheds:
         print(f"[schedule] created {', '.join(added_scheds)}")
     print(f"[ems]      Output:EnergyManagementSystem added: {ems} (produces eplusout.edd)")
