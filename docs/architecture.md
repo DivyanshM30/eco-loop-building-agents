@@ -369,18 +369,3 @@ schedule it was meant to beat.
   driven entirely by the 21 January heating design day.
 
 ---
-
-## 9. Demo script (≤3 min video)
-
-| Time | Shot |
-|---|---|
-| 0:00–0:20 | Problem: BMS schedules are static; 40% of global energy is buildings |
-| 0:20–0:40 | Architecture diagram; say the line: *"the LLM writes the policy, it is not in the loop"* |
-| 0:40–1:30 | Split screen: simulation console + `agent_trace.jsonl` tailing. Narrate one complete loop — sensor read → agent reasoning → `commit_policy` → setpoint change |
-| 1:30–2:10 | Dashboard: cumulative energy A/B, PMV histogram inside the comfort band |
-| 2:10–2:40 | **Kill the LLM server mid-run.** Show the simulation continuing on the last-known-good policy and completing. |
-| 2:40–3:00 | Headline numbers: % kWh saved, % peak reduction, comfort verdict PASS |
-
-The failure demo at 2:10 is the strongest 20 seconds in the video — nobody else
-will show their fault tolerance, and it is direct evidence for the 30% "System
-Integration" criterion.
