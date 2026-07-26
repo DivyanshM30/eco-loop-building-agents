@@ -104,7 +104,19 @@ agent:
   # How often the cognitive tier re-derives policy, in SIMULATION hours.
   # 24 = once per simulated day. Lower it for the demo, raise it for annual runs.
   cadence_sim_hours: 24
-  timeout_s: 20
+
+  # A 7-day simulation runs in ~1.5 s of wall clock while a local LLM call takes
+  # tens of seconds. The async agent therefore gets ONE shot per short run: the
+  # sim races past every later cadence point while the first call is still in
+  # flight, and the busy guard (correctly) skips them. warm_start blocks the
+  # simulation for the FIRST policy only, so every run contains at least one
+  # LLM-authored policy; subsequent invocations stay fully asynchronous and
+  # off the critical path.
+  warm_start: true
+
+  # Generous enough for a 3B model on CPU. The reflex tier still runs regardless,
+  # so a slow model costs invocations, never correctness.
+  timeout_s: 120
   max_retries: 2
   aggregate_window_hours: 24
 
@@ -113,10 +125,19 @@ llm:
   #   Ollama : base_url http://localhost:11434/v1   (start with `ollama serve`)
   #   vLLM   : base_url http://localhost:8000/v1
   base_url: "http://localhost:11434/v1"
-  model: "llama3.1:8b"
+  # llama3.2:3b (~2 GB) is enough for this narrow JSON-emitting task and pulls
+  # fast. For better schema adherence swap to llama3.1:8b or qwen2.5:7b-instruct
+  # (~4.7 GB) — no code change, just this line.
+  model: "llama3.2:3b"
   api_key: "not-needed-for-local"
-  temperature: 0.2
-  max_tokens: 900
+  # 0.0 for reproducibility. With ~2 invocations per short run, a single sampled
+  # policy governs most of the week, so temperature 0.2 produced a 0.85-4.35%
+  # spread across otherwise identical runs. A control system should be
+  # deterministic given the same inputs.
+  temperature: 0.0
+  # A policy is a small JSON object; 400 tokens is ample and roughly halves
+  # generation time versus 900 on a CPU-bound local model.
+  max_tokens: 400
   # Ollama and vLLM both honour this; it is the single biggest reliability win.
   force_json: true
 

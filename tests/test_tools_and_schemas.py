@@ -69,9 +69,15 @@ def test_extract_json_raises_on_garbage():
 # ------------------------------------------------------------- schema validation
 
 def valid_policy_dict() -> dict:
+    """A COMPLETE policy: commit_policy requires an entry for every configured
+    zone, because PolicyExecutor replaces the whole setpoint map and any omitted
+    zone would silently revert to the config default."""
     return {
         "valid_from_hour": 24,
-        "zones": [{"zone": "CORE_ZN", "cooling_sp_c": 25.0, "heating_sp_c": 20.0}],
+        "zones": [
+            {"zone": "CORE_ZN", "cooling_sp_c": 25.0, "heating_sp_c": 20.0},
+            {"zone": "PERIMETER_ZN_1", "cooling_sp_c": 25.5, "heating_sp_c": 20.0},
+        ],
         "night_setback_c": 3.0,
         "precool_hours": 2,
         "rationale": "Widen deadband overnight.",
@@ -126,8 +132,30 @@ def test_prompt_schema_is_small():
 def test_commit_policy_accepts_valid(box):
     result = box.commit_policy(valid_policy_dict())
     assert result["accepted"] is True
-    assert result["zones_updated"] == ["CORE_ZN"]
+    assert set(result["zones_updated"]) == {"CORE_ZN", "PERIMETER_ZN_1"}
     assert box.store.drain_inbox(), "accepted policy should reach the inbox"
+
+
+def test_commit_policy_rejects_partial_zone_coverage(box):
+    """Observed in a real run: the model returned 2 of 5 zones, and the missing
+    three silently reverted to the config default."""
+    d = valid_policy_dict()
+    d["zones"] = d["zones"][:1]          # drop PERIMETER_ZN_1
+    result = box.commit_policy(d)
+    assert result["accepted"] is False
+    assert "PERIMETER_ZN_1" in result["reason"]
+    assert "missing" in result["reason"].lower()
+    assert not box.store.drain_inbox(), "partial policy must not reach the inbox"
+
+
+def test_agent_toolbox_does_not_queue_to_inbox(cfg, tmp_path):
+    """The agent installs via its callback; queueing too would double-install."""
+    from src.runtime_store import RuntimeStore
+
+    store = RuntimeStore(tmp_path / "agent_store")
+    agent_box = ToolBox(cfg, store, queue_to_inbox=False)
+    assert agent_box.commit_policy(valid_policy_dict())["accepted"] is True
+    assert store.drain_inbox() == [], "agent box must not queue"
 
 
 def test_commit_policy_rejects_unknown_zone(box):

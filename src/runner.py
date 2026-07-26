@@ -104,7 +104,9 @@ def run(mode: str, cfg, run_hours_limit: float | None = None) -> Path:
 
     store = RuntimeStore(cfg.resolve("paths.store_dir"))
     store.reset()
-    box = ToolBox(cfg, store)
+    # queue_to_inbox=False: the agent installs via its callback, so queueing
+    # would cause the runner to install the same policy again as source='mcp'.
+    box = ToolBox(cfg, store, queue_to_inbox=False)
 
     # Deliverable #2: materialise each installed policy as a runnable .idf.
     gen_dir = cfg.resolve("energyplus.idf").parent / "generated"
@@ -139,7 +141,9 @@ def run(mode: str, cfg, run_hours_limit: float | None = None) -> Path:
     cadence = float(cfg.get_path("agent.cadence_sim_hours", 24))
     window = int(cfg.get_path("agent.aggregate_window_hours", 24))
     counters = {"steps": 0, "warmup_skipped": 0, "last_agent_hour": -1e9, "errors": 0,
-                "bind_failed": False, "bind_reported": False, "design_day_skipped": 0}
+                "bind_failed": False, "bind_reported": False, "design_day_skipped": 0,
+                "agent_triggers": 0, "warm_start_deferred": 0}
+    warm_start = bool(cfg.get_path("agent.warm_start", True))
     t_start = time.time()
 
     def on_timestep(s):
@@ -223,11 +227,32 @@ def run(mode: str, cfg, run_hours_limit: float | None = None) -> Path:
 
                 if agent is not None and sample.sim_hour - counters["last_agent_hour"] >= cadence:
                     counters["last_agent_hour"] = sample.sim_hour
-                    agent.maybe_invoke(sample.sim_hour, agg, {
+                    policy_view = {
                         "source": executor.active.source,
                         "night_setback_c": executor.active.night_setback_c,
                         "precool_hours": executor.active.precool_hours,
-                    })
+                    }
+                    # Hold the warm start until the building has actually been
+                    # occupied and comfort data exists. The first cadence point
+                    # lands at 01:00 on day 1, when PMV is necessarily null
+                    # (comfort is scored over occupied hours only) and the 24 h
+                    # window predates the run. An agent invoked there has no
+                    # comfort evidence, and its blind policy then governs most
+                    # of a 7-day run.
+                    have_comfort = (agg.get("pmv") or {}).get("mean") is not None
+                    if warm_start and counters["agent_triggers"] == 0:
+                        if not have_comfort:
+                            counters["warm_start_deferred"] += 1
+                            counters["last_agent_hour"] = -1e9   # retry next tick
+                        else:
+                            print("[tier2] warm start: waiting for the first LLM policy "
+                                  f"(occupied PMV mean {agg['pmv']['mean']})...")
+                            got = agent.invoke_blocking(sample.sim_hour, agg, policy_view)
+                            print(f"[tier2] warm start {'installed a policy' if got else 'failed - continuing on default policy'}")
+                            counters["agent_triggers"] += 1
+                    else:
+                        agent.maybe_invoke(sample.sim_hour, agg, policy_view)
+                        counters["agent_triggers"] += 1
 
             mean_zone = (
                 sum(sample.zone_temps.values()) / len(sample.zone_temps)
@@ -305,6 +330,9 @@ def run(mode: str, cfg, run_hours_limit: float | None = None) -> Path:
           f"policy_source={executor.active.source}")
     if agent is not None:
         print(f"[tier2] {agent.stats()}")
+        if counters["warm_start_deferred"]:
+            print(f"[tier2] warm start deferred {counters['warm_start_deferred']} tick(s) "
+                  "until occupied comfort data existed")
     snaps = snapshot_summary(gen_dir)
     if snaps["count"]:
         print(f"[models] {snaps['count']} runtime policy snapshot(s) -> {gen_dir}")

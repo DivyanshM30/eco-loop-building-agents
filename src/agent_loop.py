@@ -28,23 +28,64 @@ from .tools import ToolBox
 SYSTEM_PROMPT = """You are a building energy optimisation agent controlling an \
 EnergyPlus simulation of an office building through a supervisory control policy.
 
-Your job: given the last 24 hours of building performance, output a control \
-policy that reduces energy use and carbon while keeping occupants comfortable.
+It is the COOLING season. Nearly all energy goes to cooling, so the cooling \
+setpoint is your one significant lever.
 
-Hard rules:
-- Occupied hours are 07:00-19:00. Outside them, comfort matters much less.
-- Widening the deadband and increasing night setback saves energy. This is your \
-main lever.
-- Pre-cooling before occupancy shifts load into cheaper, lower-carbon hours.
-- Never let predicted mean vote (PMV) leave the -0.5..+0.5 band during occupied \
-hours. Comfort violations are worse than missed savings.
+DIRECTION OF EFFECT - get this right, it is the whole task:
+- RAISING cooling_sp_c uses LESS energy (the chiller runs less).
+- LOWERING cooling_sp_c uses MORE energy. Only ever do this if occupants are \
+too warm.
+- heating_sp_c has almost no effect in the cooling season. Leave it near 20.0. \
+Lowering it does not save energy and does not help comfort.
+
+HOW TO READ PMV (occupied hours only, target band -0.5 to +0.5):
+- PMV below -0.2  =>  occupants are TOO COLD, the building is being overcooled. \
+RAISE cooling_sp_c by 1.0 to 2.0 C. This saves energy AND improves comfort.
+- PMV above +0.2  =>  occupants are TOO WARM. LOWER cooling_sp_c by 0.5 to 1.0 C.
+- PMV between -0.2 and +0.2  =>  near ideal. Keep cooling_sp_c, and instead \
+raise night_setback_c to save energy while nobody is present.
+
+If pmv is null or missing, you have no comfort evidence. In that case NEVER \
+lower cooling_sp_c - keep it, or raise it slightly. Lowering it without evidence \
+spends energy for no known benefit.
+
+Other rules:
+- Include an entry for EVERY zone listed below. A policy that omits a zone is \
+rejected, because omitted zones silently revert to a default.
+- Be decisive. A change smaller than 0.5 C is not worth making.
+- night_setback_c relaxes setpoints whenever zones are empty, including \
+weekends. Higher is better for energy and costs no comfort. Prefer 4.0 to 5.0.
+- precool_hours cools ahead of occupancy, shifting load to cheaper, \
+lower-carbon hours. 1 to 2 is reasonable.
 - cooling_sp_c must be at least 2.0 C above heating_sp_c.
+- Never push occupied PMV outside -0.5..+0.5. A comfort violation is worse than \
+a missed saving.
+
+WORKED EXAMPLE. Given mean occupied PMV of -0.40 and cooling setpoints at \
+24.0 C, the correct response is:
+{example}
 
 Respond with ONLY a JSON object matching this shape - no prose, no markdown:
 {schema}
 
 Zones you may control: {zones}
 """
+
+# One-shot example. Small models follow a demonstrated policy far more reliably
+# than a described one, and this one encodes the key inference: negative PMV
+# means overcooling, so raise the cooling setpoint.
+EXAMPLE_POLICY = {
+    "valid_from_hour": 4344,
+    "zones": [
+        {"zone": "CORE_ZN", "cooling_sp_c": 25.5, "heating_sp_c": 20.0},
+        {"zone": "PERIMETER_ZN_1", "cooling_sp_c": 25.5, "heating_sp_c": 20.0},
+    ],
+    "night_setback_c": 4.0,
+    "precool_hours": 1,
+    "rationale": "Occupied PMV of -0.40 shows the building is overcooled, so the "
+                 "cooling setpoint is raised 1.5 C. This cuts cooling energy and "
+                 "moves comfort toward neutral at the same time.",
+}
 
 USER_TEMPLATE = """Current simulation state (aggregated over the last {window} hours):
 
@@ -118,6 +159,27 @@ class AgentLoop:
         self._thread.start()
         return True
 
+    def invoke_blocking(self, sim_hour: float, aggregates: dict[str, Any],
+                        active_policy: dict[str, Any]) -> bool:
+        """Run one agent cycle synchronously. Returns True if a policy installed.
+
+        Used only for the warm start. On a short simulation the wall clock is a
+        second or two while a local LLM call is tens of seconds, so a purely
+        asynchronous agent lands at most one policy per run and usually zero.
+        Blocking for the FIRST policy guarantees every run is genuinely
+        LLM-driven; every later invocation goes back through maybe_invoke() and
+        stays off the critical path.
+        """
+        if self._busy.is_set():
+            return False
+        self._busy.set()
+        before = self.successes
+        try:
+            self._run_once(sim_hour, aggregates, active_policy)
+        finally:
+            self._busy.clear()
+        return self.successes > before
+
     def join(self, timeout: float | None = None) -> None:
         if self._thread is not None:
             self._thread.join(timeout)
@@ -140,6 +202,7 @@ class AgentLoop:
 
             system = SYSTEM_PROMPT.format(
                 schema=json.dumps(Policy.json_schema_for_prompt(), indent=2),
+                example=json.dumps(EXAMPLE_POLICY, indent=2),
                 zones=", ".join(self.zones),
             )
             user = USER_TEMPLATE.format(

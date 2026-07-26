@@ -27,9 +27,18 @@ MAX_LOG_LINES = 40
 
 
 class ToolBox:
-    def __init__(self, cfg: Config, store: RuntimeStore):
+    def __init__(self, cfg: Config, store: RuntimeStore, queue_to_inbox: bool = True):
+        """queue_to_inbox=False for the in-process agent.
+
+        The agent installs accepted policies directly through its on_policy
+        callback. If commit_policy ALSO queued them, the runner would drain the
+        inbox and install the same policy a second time as source='mcp' —
+        double-counting installs and burning a snapshot slot. External MCP
+        clients have no callback, so for them the inbox is the only route in.
+        """
         self.cfg = cfg
         self.store = store
+        self.queue_to_inbox = queue_to_inbox
 
     # ------------------------------------------------------------------- reads
 
@@ -199,19 +208,72 @@ class ToolBox:
             return rejection.model_dump()
 
         known = {str(z).upper() for z in self.cfg.get_path("zones", [])}
-        unknown = [z.zone for z in parsed.zones if z.zone not in known]
+        supplied = {z.zone for z in parsed.zones}
+
+        unknown = sorted(supplied - known)
         if unknown:
             rej = {
                 "accepted": False,
                 "rejected_fields": ["zones"],
                 "reason": f"unknown zone(s) {unknown}; valid zones are {sorted(known)}",
             }
-            self.store.trace("policy_rejected", **rej)
+            self.store.trace("policy_rejected", stage="tool", **rej)
             return rej
 
-        self.store.propose_policy(parsed.model_dump(), source="commit_policy")
+        # A partial policy is silently dangerous: PolicyExecutor replaces the
+        # whole setpoint map, so any zone the agent omits reverts to the config
+        # default rather than keeping its current value. Reject and let the
+        # agent self-correct instead of half-applying its intent.
+        missing = sorted(known - supplied)
+        if missing:
+            rej = {
+                "accepted": False,
+                "rejected_fields": ["zones"],
+                "reason": (
+                    f"policy must cover ALL {len(known)} zones; missing {missing}. "
+                    f"Resubmit with an entry for every zone: {sorted(known)}"
+                ),
+            }
+            self.store.trace("policy_rejected", stage="tool", **rej)
+            return rej
+
+        # Direction guard: never let a policy move the cooling setpoint the wrong
+        # way relative to measured comfort.
+        #
+        # The prompt tells the model that raising cooling_sp_c saves energy, but a
+        # prompt is a request, not a guarantee — across identical runs the same
+        # model both raised and lowered it, swinging savings from 0.85% to 4.35%.
+        # Enforcing the direction here makes the outcome robust to model variance
+        # and turns a bad sample into a structured rejection the agent can fix.
+        snap = self.store.read_snapshot()
+        pmv = (snap.get("aggregates", {}).get("pmv") or {}).get("mean")
+        active = (snap.get("active_policy", {}).get("zone_setpoints") or {})
+        if pmv is not None and pmv < -0.2 and active:
+            wrong_way = []
+            for z in parsed.zones:
+                current = active.get(z.zone)
+                if current and z.cooling_sp_c < float(current[1]) - 1e-9:
+                    wrong_way.append(f"{z.zone} {current[1]}->{z.cooling_sp_c}")
+            if wrong_way:
+                rej = {
+                    "accepted": False,
+                    "rejected_fields": ["zones.cooling_sp_c"],
+                    "reason": (
+                        f"occupied PMV is {pmv} (below -0.2), so occupants are too COLD "
+                        f"and the building is being overcooled. Lowering cooling_sp_c "
+                        f"increases energy use and makes comfort worse. Rejected: "
+                        f"{', '.join(wrong_way)}. Raise cooling_sp_c above its current "
+                        f"value for every zone instead."
+                    ),
+                }
+                self.store.trace("policy_rejected", stage="direction_guard", **rej)
+                return rej
+
+        if self.queue_to_inbox:
+            self.store.propose_policy(parsed.model_dump(), source="commit_policy")
         self.store.trace("policy_accepted", zones=len(parsed.zones),
-                         rationale=parsed.rationale[:200])
+                         rationale=parsed.rationale[:200],
+                         queued=self.queue_to_inbox)
         return {
             "accepted": True,
             "zones_updated": [z.zone for z in parsed.zones],
